@@ -753,6 +753,71 @@ class _TestProcess(BaseTestCase):
         self.assertTrue(wait_for_handle(sentinel, timeout=1))
 
     @classmethod
+    def _test_child_fds_not_inheritable(cls, conn):
+        from multiprocessing import forkserver, resource_tracker
+        fds = [conn.fileno(), resource_tracker._resource_tracker._fd,
+               forkserver._forkserver._forkserver_alive_fd]
+        conn.send([os.get_inheritable(fd) for fd in fds if fd is not None])
+        conn.close()
+
+    @unittest.skipIf(sys.platform == "win32", "test needs POSIX fds")
+    @warnings_helper.ignore_fork_in_thread_deprecation_warnings()
+    def test_child_fds_not_inheritable(self):
+        # fds that multiprocessing hands to the child must not leak into
+        # programs the child execs, regardless of the start method
+        if self.TYPE == "threads":
+            self.skipTest('test not appropriate for {}'.format(self.TYPE))
+        conn, child_conn = self.Pipe(duplex=False)
+        p = self.Process(target=self._test_child_fds_not_inheritable,
+                         args=(child_conn,))
+        p.start()
+        child_conn.close()
+        inheritable = conn.recv()
+        p.join()
+        conn.close()
+        self.assertTrue(inheritable)
+        self.assertNotIn(True, inheritable)
+
+    @classmethod
+    def _test_sentinel_not_inherited(cls, conn):
+        # A long-lived program that inherits all inheritable fds
+        args = [sys.executable, '-c',
+                'import time; time.sleep(%s)' % support.LONG_TIMEOUT]
+        devnull = [(os.POSIX_SPAWN_OPEN, fd, os.devnull, os.O_RDWR, 0)
+                   for fd in (0, 1, 2)]
+        pid = os.posix_spawn(sys.executable, args, os.environ,
+                             file_actions=devnull)
+        conn.send(pid)
+        conn.close()
+
+    @unittest.skipUnless(hasattr(os, "posix_spawn"),
+                         "test needs os.posix_spawn")
+    @warnings_helper.ignore_fork_in_thread_deprecation_warnings()
+    def test_sentinel_not_inherited(self):
+        # The sentinel must become ready when the child exits, even if a
+        # program started by the child outlives it
+        if self.TYPE == "threads":
+            self.skipTest('test not appropriate for {}'.format(self.TYPE))
+        conn, child_conn = self.Pipe(duplex=False)
+        p = self.Process(target=self._test_sentinel_not_inherited,
+                         args=(child_conn,))
+        p.start()
+        child_conn.close()
+        pid = conn.recv()
+        conn.close()
+        self.addCleanup(self._kill_process_if_alive, pid)
+        p.join()
+        self.assertTrue(wait_for_handle(p.sentinel,
+                                        timeout=support.SHORT_TIMEOUT))
+
+    @staticmethod
+    def _kill_process_if_alive(pid):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+    @classmethod
     def _test_close(cls, rc=0, q=None):
         if q is not None:
             q.get()
@@ -4179,6 +4244,32 @@ class _TestConnection(BaseTestCase):
         p.join()
         with open(os_helper.TESTFN, "rb") as f:
             self.assertEqual(f.read(), b"foo")
+
+    @classmethod
+    def _test_fd_transfer_not_inheritable(cls, conn):
+        fd = reduction.recv_handle(conn)
+        conn.send(os.get_inheritable(fd))
+        os.close(fd)
+
+    @warnings_helper.ignore_fork_in_thread_deprecation_warnings()
+    @unittest.skipUnless(HAS_REDUCTION, "test needs multiprocessing.reduction")
+    @unittest.skipIf(sys.platform == "win32", "test needs POSIX fds")
+    def test_fd_transfer_not_inheritable(self):
+        if self.TYPE != 'processes':
+            self.skipTest("only makes sense with processes")
+        conn, child_conn = self.Pipe(duplex=True)
+        p = self.Process(target=self._test_fd_transfer_not_inheritable,
+                         args=(child_conn,))
+        p.daemon = True
+        p.start()
+        self.addCleanup(p.join)
+        r, w = os.pipe()
+        try:
+            reduction.send_handle(conn, r, p.pid)
+            self.assertFalse(conn.recv())
+        finally:
+            os.close(r)
+            os.close(w)
 
     @warnings_helper.ignore_fork_in_thread_deprecation_warnings()
     @unittest.skipUnless(HAS_REDUCTION, "test needs multiprocessing.reduction")

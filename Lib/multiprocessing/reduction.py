@@ -169,6 +169,8 @@ else:
                 if len(cmsg_data) % a.itemsize != 0:
                     raise ValueError
                 a.frombytes(cmsg_data)
+                for fd in a:
+                    os.set_inheritable(fd, False)
                 if len(a) % 256 != msg[0]:
                     raise AssertionError(
                         "Len is {0:n} but msg[0] is {1!r}".format(
