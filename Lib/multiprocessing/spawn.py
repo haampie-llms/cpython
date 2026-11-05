@@ -95,7 +95,8 @@ def get_command_line(**kwds):
         return [exe] + opts + ['-c', prog, '--multiprocessing-fork']
 
 
-def spawn_main(pipe_handle, parent_pid=None, tracker_fd=None):
+def spawn_main(pipe_handle, parent_pid=None, tracker_fd=None,
+               sentinel_fd=None):
     '''
     Run code specified by data received over pipe
     '''
@@ -117,6 +118,10 @@ def spawn_main(pipe_handle, parent_pid=None, tracker_fd=None):
     else:
         from . import resource_tracker
         resource_tracker._resource_tracker._fd = tracker_fd
+        # pass_fds made these inheritable; don't leak them to exec'd programs
+        for inherited_fd in (tracker_fd, sentinel_fd):
+            if inherited_fd is not None:
+                os.set_inheritable(inherited_fd, False)
         fd = pipe_handle
         parent_sentinel = os.dup(pipe_handle)
     exitcode = _main(fd, parent_sentinel)
